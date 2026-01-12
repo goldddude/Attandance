@@ -5,32 +5,46 @@ This file makes your Flask app compatible with Vercel's serverless architecture
 import os
 import sys
 
-# Add parent directory to path so we can import from src
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+# Move to the project root directory
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BASE_DIR)
 
 from flask import Flask, send_from_directory, request, jsonify
 from flask_cors import CORS
 
 # Create Flask app
-app = Flask(__name__, static_folder='../src/static', static_url_path='')
+static_folder = os.path.join(BASE_DIR, 'src', 'static')
+app = Flask(__name__, static_folder=static_folder, static_url_path='')
 
 # Configuration
+# Vercel's filesystem is READ-ONLY. If using SQLite, we MUST use /tmp
+database_url = os.getenv('DATABASE_URL')
+if not database_url:
+    # Use /tmp for SQLite to prevent "ReadOnly" crash, but data won't persist between requests
+    database_url = 'sqlite:///' + os.path.join('/tmp', 'nfc_attendance.db')
+elif database_url.startswith('postgres://'):
+    # Fix for newer SQLAlchemy versions which require 'postgresql://' instead of 'postgres://'
+    database_url = database_url.replace('postgres://', 'postgresql://', 1)
+
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'sqlite:///nfc_attendance.db')
+app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # Initialize CORS
 CORS(app)
 
 # Import and initialize database
-from src.models import db, Student, Attendance, Faculty
+from src.models import db
 db.init_app(app)
 
-# Create database tables
+# Create database tables (Safe for serverless)
 with app.app_context():
-    db.create_all()
+    try:
+        db.create_all()
+    except Exception as e:
+        print(f"Database creation warning: {e}")
 
-# Register blueprints (modular approach - better for serverless)
+# Register blueprints
 from src.api.students import students_bp
 from src.api.nfc import nfc_bp
 from src.api.attendance import attendance_bp
@@ -44,19 +58,15 @@ app.register_blueprint(faculty_bp, url_prefix='/api/faculty')
 # Frontend routes
 @app.route('/')
 def index():
-    return send_from_directory('../src/static', 'index.html')
+    return send_from_directory(app.static_folder, 'index.html')
 
 @app.route('/<path:path>')
 def serve_static(path):
-    try:
-        return send_from_directory('../src/static', path)
-    except:
-        return send_from_directory('../src/static', 'index.html')
+    # Try to serve the static file, but fallback to index.html for SPA-style routing
+    if os.path.exists(os.path.join(app.static_folder, path)):
+        return send_from_directory(app.static_folder, path)
+    return send_from_directory(app.static_folder, 'index.html')
 
-# Vercel expects a variable named 'app' or 'application'
-# This is the CRITICAL part for serverless deployment
-handler = app
+# Vercel expects a variable named 'app'
+app = app
 
-# For local development
-if __name__ == '__main__':
-    app.run(debug=True)
